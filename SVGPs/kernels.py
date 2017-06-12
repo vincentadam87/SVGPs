@@ -19,6 +19,7 @@
 
 import tensorflow as tf
 import numpy as np
+from functools import reduce
 from settings import int_type
 
 
@@ -78,6 +79,30 @@ class Kern(object):
             X = tf.identity(X)
 
         return X, X2
+
+    def _slice_batch(self, X, X2):
+        """
+        Slice the correct dimensions for use in the kernel, as indicated by
+        `self.active_dims`.
+        :param X: Input 1 (NxDxB).
+        :param X2: Input 2 (MxD), may be None.
+        :return: Sliced X, X2, (Nxself.input_dimxB), (Nxself.input_dim).
+        """
+        if isinstance(self.active_dims, slice):
+            X = X[:, self.active_dims,:]
+            if X2 is not None:
+                X2 = X2[:, self.active_dims]
+        else:
+            X = tf.transpose(tf.gather(tf.transpose(X,(1,0,2)), self.active_dims),(1,0,2))
+            if X2 is not None:
+                X2 = tf.transpose(tf.gather(X2, self.active_dims))
+        with tf.control_dependencies([
+            tf.assert_equal(tf.shape(X)[1], tf.constant(self.input_dim, dtype=int_type))
+        ]):
+            X = tf.identity(X)
+
+        return X, X2
+
 
     def _slice_cov(self, cov):
         """
@@ -147,6 +172,41 @@ class Stationary(Kern):
     def Kdiag(self, X, presliced=False):
         return tf.fill(tf.stack([tf.shape(X)[0]]), tf.squeeze(self.variance))
 
+    def square_dist_batch(self, X, X2):
+        """
+        :param X: NxDxB
+        :param X2: NxD
+        :return: NxNxB
+        """
+        X = X / tf.expand_dims(tf.expand_dims(self.lengthscales,-1),0)
+        Xs = tf.reduce_sum(tf.square(X), 1) # NxB
+        if X2 is None:
+            d= -2 * tf.matmul(tf.transpose(X,(2,0,1)), tf.transpose(X,(2,1,0))) + \
+                   tf.expand_dims(tf.transpose(Xs),1)+ \
+                   tf.expand_dims(tf.transpose(Xs),-1)
+        else:
+            shape = tf.stack([1,1,tf.shape(X)[-1]])
+            X2 = tf.tile(tf.expand_dims(X2/self.lengthscales,-1),shape)
+            X2s = tf.reduce_sum(tf.square(X2), 1) # NxB
+            d= -2 * tf.matmul(tf.transpose(X,(2,0,1)), tf.transpose(X2,(2,1,0))) + \
+                   tf.expand_dims(tf.transpose(Xs), -1) + \
+                   tf.expand_dims(tf.transpose(X2s), 1)
+        # d is BxNxN
+        return tf.transpose(d,(1,2,0)) # N x N x B
+
+    def euclid_dist_batch(self, X, X2):
+        r2 = self.square_dist_batch(X, X2)
+        return tf.sqrt(r2 + 1e-12)
+
+    def Kdiag_batch(self, X, presliced=False):
+        """
+        :param X: NxDxB 
+        :param presliced: 
+        :return: NxB
+        """
+        return tf.fill(tf.stack([tf.shape(X)[0],tf.shape(X)[-1]]), tf.squeeze(self.variance))
+
+
 
 class RBF(Stationary):
     """
@@ -158,6 +218,10 @@ class RBF(Stationary):
             X, X2 = self._slice(X, X2)
         return self.variance * tf.exp(-self.square_dist(X, X2) / 2)
 
+    def K_batch(self, X, X2=None, presliced=False):
+        if not presliced:
+            X, X2 = self._slice_batch(X, X2)
+        return self.variance * tf.exp(-self.square_dist_batch(X, X2) / 2)
 
 
 class PeriodicKernel(Kern):
@@ -220,3 +284,53 @@ class LocallyPeriodicKernel(Kern):
         f2 = tf.expand_dims(X2, 0)  # now 1 x M x D
         r = tf.reduce_sum(f-f2,2) #hack for 1d
         return self.variance * tf.exp( - tf.square(r/self.lengthscales) ) * tf.cos(2.*np.pi *r/ self.period)
+
+
+
+class Combination(Kern):
+    """
+    Combine  a list of kernels, e.g. by adding or multiplying (see inheriting
+    classes).
+    The names of the kernels to be combined are generated from their class
+    names.
+    """
+
+    def __init__(self, kern_list):
+        for k in kern_list:
+            assert isinstance(k, Kern), "can only add Kern instances"
+        input_dim = np.max([k.input_dim
+                            if type(k.active_dims) is slice else
+                            np.max(k.active_dims) + 1
+                            for k in kern_list])
+        Kern.__init__(self, input_dim=input_dim)
+        # add kernels to a list, flattening out instances of this class therein
+        self.kern_list = kern_list
+
+
+
+class Add(Combination):
+    def K(self, X, X2=None, presliced=False):
+        return reduce(tf.add, [k.K(X, X2) for k in self.kern_list])
+
+    def Kdiag(self, X, presliced=False):
+        return reduce(tf.add, [k.Kdiag(X) for k in self.kern_list])
+
+    def K_batch(self, X, X2=None, presliced=False):
+        return reduce(tf.add, [k.K_batch(X, X2) for k in self.kern_list])
+
+    def Kdiag_batch(self, X, presliced=False):
+        return reduce(tf.add, [k.Kdiag_batch(X) for k in self.kern_list])
+
+
+class Prod(Combination):
+    def K(self, X, X2=None, presliced=False):
+        return reduce(tf.multiply, [k.K(X, X2) for k in self.kern_list])
+
+    def Kdiag(self, X, presliced=False):
+        return reduce(tf.multiply, [k.Kdiag(X) for k in self.kern_list])
+
+    def K_batch(self, X, X2=None, presliced=False):
+        return reduce(tf.multiply, [k.K_batch(X, X2) for k in self.kern_list])
+
+    def Kdiag_batch(self, X, presliced=False):
+        return reduce(tf.multiply, [k.Kdiag_batch(X) for k in self.kern_list])
