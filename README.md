@@ -2,7 +2,7 @@
 
 Interacting Sparse Variational Gaussian Processes
 
-A doubly stochastic version of Chained Gaussian Processes
+A doubly stochastic algorithm for inference in models with multiple interacting latent GPs
 
 ## Requirements (Python 3)
 * tensorflow==1.1.0
