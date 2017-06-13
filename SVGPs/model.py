@@ -242,7 +242,8 @@ class CSVGPs(object):
     """
     Coupled SVGPs
     """
-    def __init__(self, X, Y, kerns,likelihood,Zs, f_indices=None,mean_functions=None, whiten=True,
+    def __init__(self, X, Y, kerns,likelihood,Zs, n_param=0,
+                 f_indices=None,mean_functions=None, whiten=True,
                  n_samp=50,sampling=False):
         '''
         - X is a data matrix, size N x D
@@ -271,6 +272,7 @@ class CSVGPs(object):
         self.sampling = sampling
 
         self.num_inducing = [z.shape[0] for z in Zs]
+
         self.Mtot = np.sum(self.num_inducing)
 
         with tf.variable_scope("inference") as scope:
@@ -294,7 +296,8 @@ class CSVGPs(object):
         if self.whiten:
             KL = gauss_kl_white(self.q_mu, self.q_sqrt)
         else:
-            K = block_diagonal([self.kerns[d].K(self.Zs[d]) for d in range(self.C)])+ \
+            diag = [self.kerns[d].K(self.Zs[d]) for d in range(self.C)]
+            K = block_diagonal(diag)+ \
                     eye(self.Mtot) * jitter_level
             KL = gauss_kl(self.q_mu, self.q_sqrt, K)
         return KL

@@ -20,8 +20,8 @@
 import tensorflow as tf
 import numpy as np
 from functools import reduce
-from settings import int_type
-
+from settings import int_type,float_type
+from functions import eye
 
 
 class Kern(object):
@@ -63,7 +63,7 @@ class Kern(object):
         `self.active_dims`.
         :param X: Input 1 (NxD).
         :param X2: Input 2 (MxD), may be None.
-        :return: Sliced X, X2, (Nxself.input_dim).
+        :return: Sliced X, X2, (N x self.input_dim).
         """
         if isinstance(self.active_dims, slice):
             X = X[:, self.active_dims]
@@ -86,7 +86,7 @@ class Kern(object):
         `self.active_dims`.
         :param X: Input 1 (NxDxB).
         :param X2: Input 2 (MxD), may be None.
-        :return: Sliced X, X2, (Nxself.input_dimxB), (Nxself.input_dim).
+        :return: Sliced X, X2, (N x self.input_dim x B), (N x self.input_dim).
         """
         if isinstance(self.active_dims, slice):
             X = X[:, self.active_dims,:]
@@ -334,3 +334,102 @@ class Prod(Combination):
 
     def Kdiag_batch(self, X, presliced=False):
         return reduce(tf.multiply, [k.Kdiag_batch(X) for k in self.kern_list])
+
+
+
+class Linear(Kern):
+    """
+    The linear kernel
+    """
+
+    def __init__(self, input_dim, variance=1.0, active_dims=None):
+        """
+        - input_dim is the dimension of the input to the kernel
+        - variance is the (initial) value for the variance parameter(s)
+        - active_dims is a list of length input_dim which controls
+          which columns of X are used.
+        """
+        Kern.__init__(self, input_dim, active_dims)
+        self.variance = tf.get_variable("variance", [1], initializer=tf.constant_initializer(variance))
+
+    def K(self, X, X2=None, presliced=False):
+        if not presliced:
+            X, X2 = self._slice(X, X2)
+        if X2 is None:
+            return tf.matmul(X * self.variance, X, transpose_b=True)
+        else:
+            return tf.matmul(X * self.variance, X2, transpose_b=True)
+
+    def Kdiag(self, X, presliced=False):
+        if not presliced:
+            X, _ = self._slice(X, None)
+        return tf.reduce_sum(tf.square(X) * self.variance, 1)
+
+    def K_batch(self, X, X2=None, presliced=False):
+        if not presliced:
+            X, X2 = self._slice_batch(X, X2)
+        if X2 is None:
+            return tf.einsum('ndb,mdb->nmb',X,X)
+        else:
+            return tf.einsum('ndb,md->nmb',X,X2)
+
+    def Kdiag_batch(self, X, presliced=False):
+        if not presliced:
+            X, _ = self._slice_batch(X, None)
+        return tf.reduce_sum(tf.square(X) * self.variance, 1)
+
+
+
+class Static(Kern):
+    """
+    Kernels who don't depend on the value of the inputs are 'Static'.  The only
+    parameter is a variance.
+    """
+
+    def __init__(self, input_dim, variance=1.0, active_dims=None):
+        Kern.__init__(self, input_dim, active_dims)
+        self.variance = tf.get_variable("variance", [1],  initializer=tf.constant_initializer(variance))
+
+    def Kdiag(self, X):
+        return tf.fill(tf.stack([tf.shape(X)[0]]), tf.squeeze(self.variance))
+
+    def Kdiag_batch(self, X, presliced=False):
+        if not presliced:
+            X, _ = self._slice_batch(X, None)
+        return tf.fill(tf.stack([tf.shape(X)[0],tf.shape(X)[-1]]), tf.squeeze(self.variance))
+
+
+class White(Static):
+    """
+    The White kernel
+    """
+
+    def K(self, X, X2=None, presliced=False):
+        if X2 is None:
+            d = tf.fill(tf.stack([tf.shape(X)[0]]), tf.squeeze(self.variance))
+            return tf.diag(d)
+        else:
+            shape = tf.stack([tf.shape(X)[0], tf.shape(X2)[0]])
+            return tf.zeros(shape, float_type)
+
+    def K_batch(self, X, X2=None, presliced=False):
+        if X2 is None:
+            d = tf.fill(tf.stack([tf.shape(X)[-1],tf.shape(X)[0]]), tf.squeeze(self.variance))
+            return tf.transpose(tf.matrix_diag(d),(1,2,0))
+        else:
+            shape = tf.stack([tf.shape(X)[0], tf.shape(X2)[0],tf.shape(X)[-1]])
+            return tf.zeros(shape, float_type)
+
+
+class Constant(Static):
+    """
+    The constant kernel
+    """
+
+    def K(self, X, X2=None, presliced=False):
+        if X2 is None: # returns the prior
+            shape = tf.stack([tf.shape(X)[0],tf.shape(X)[0]])
+        else:
+            shape = tf.stack([tf.shape(X)[0],tf.shape(X2)[0]])
+        return tf.fill(shape, tf.squeeze(self.variance))
+

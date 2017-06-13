@@ -167,8 +167,8 @@ def conditional_stack(Xnew, Xs, kerns, f, f_indices=None, q_sqrt=None, whiten=Fa
     C = len(kerns)
     f_indices = [[c] for c in range(C)] if f_indices is None else f_indices
     N = Xnew.get_shape()[0].value
-    Mtot = f.get_shape()[0].value
     Ms = tf.stack([x.get_shape()[0] for x in Xs])
+    Mtot = tf.reduce_sum(Ms)
     Ks = [kerns[c].K(Xs[c]) for c in range(C)]
     Kmm = block_diagonal(Ks)
     Kmm += eye(Mtot) * jitter_level
@@ -189,7 +189,7 @@ def conditional_stack(Xnew, Xs, kerns, f, f_indices=None, q_sqrt=None, whiten=Fa
                 xc = tf.transpose(tf.gather(tf.transpose(Xnew), f_indices[c]))
                 u.append(kerns[c].K( Xs[c],xc))  #  M x N
             else:
-                u.append(tf.zeros([Ms[c],N]))
+                u.append(tf.zeros([Ms[c_],N]))
         uu.append(tf.concat(u,0))
     Knm = tf.stack(uu,0) # C x M x N
 
