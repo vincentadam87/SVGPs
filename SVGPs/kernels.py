@@ -61,44 +61,32 @@ class Kern(object):
         """
         Slice the correct dimensions for use in the kernel, as indicated by
         `self.active_dims`.
-        :param X: Input 1 (NxD).
+        :param X: Input 1 (NxD[xB]).
         :param X2: Input 2 (MxD), may be None.
-        :return: Sliced X, X2, (N x self.input_dim).
+        :return: Sliced X, X2, (N x self.input_dim [x B]), (N x self.input_dim)
         """
-        if isinstance(self.active_dims, slice):
-            X = X[:, self.active_dims]
-            if X2 is not None:
-                X2 = X2[:, self.active_dims]
-        else:
-            X = tf.transpose(tf.gather(tf.transpose(X), self.active_dims))
-            if X2 is not None:
-                X2 = tf.transpose(tf.gather(tf.transpose(X2), self.active_dims))
-        with tf.control_dependencies([
-            tf.assert_equal(tf.shape(X)[1], tf.constant(self.input_dim, dtype=int_type))
-        ]):
-            X = tf.identity(X)
 
-        return X, X2
+        if X.get_shape().ndims == 2: # M x D
+            if isinstance(self.active_dims, slice):
+                X = X[:, self.active_dims]
+                if X2 is not None:
+                    X2 = X2[:, self.active_dims]
+            else:
+                X = tf.transpose(tf.gather(tf.transpose(X), self.active_dims))
+                if X2 is not None:
+                    X2 = tf.transpose(tf.gather(tf.transpose(X2), self.active_dims))
 
-    def _slice_batch(self, X, X2):
-        """
-        Slice the correct dimensions for use in the kernel, as indicated by
-        `self.active_dims`.
-        :param X: Input 1 (NxDxB).
-        :param X2: Input 2 (MxD), may be None.
-        :return: Sliced X, X2, (N x self.input_dim x B), (N x self.input_dim).
-        """
-        if isinstance(self.active_dims, slice):
-            X = X[:, self.active_dims,:]
-            if X2 is not None:
-                X2 = X2[:, self.active_dims]
-        else:
-            X = tf.transpose(tf.gather(tf.transpose(X,(1,0,2)), self.active_dims),(1,0,2))
-            if X2 is not None:
-                X2 = tf.transpose(tf.gather(X2, self.active_dims))
-        with tf.control_dependencies([
-            tf.assert_equal(tf.shape(X)[1], tf.constant(self.input_dim, dtype=int_type))
-        ]):
+        elif X.get_shape().ndims == 3: # M x D x B
+            if isinstance(self.active_dims, slice):
+                X = X[:, self.active_dims, :]
+                if X2 is not None:
+                    X2 = X2[:, self.active_dims]
+            else:
+                X = tf.transpose(tf.gather(tf.transpose(X, (1, 0, 2)), self.active_dims), (1, 0, 2))
+                if X2 is not None:
+                    X2 = tf.transpose(tf.gather(X2, self.active_dims))
+
+        with tf.control_dependencies([ tf.assert_equal(tf.shape(X)[1], tf.constant(self.input_dim, dtype=int_type)) ]):
             X = tf.identity(X)
 
         return X, X2
@@ -154,57 +142,52 @@ class Stationary(Kern):
 
 
     def square_dist(self, X, X2):
-        X = X / self.lengthscales
-        Xs = tf.reduce_sum(tf.square(X), 1)
-        if X2 is None:
-            return -2 * tf.matmul(X, tf.transpose(X)) + \
-                   tf.reshape(Xs, (-1, 1)) + tf.reshape(Xs, (1, -1))
-        else:
-            X2 = X2 / self.lengthscales
-            X2s = tf.reduce_sum(tf.square(X2), 1)
-            return -2 * tf.matmul(X, tf.transpose(X2)) + \
-                   tf.reshape(Xs, (-1, 1)) + tf.reshape(X2s, (1, -1))
+        """
+        :param X: NxD[xB]
+        :param X2: MxD
+        :return: NxM[xB]
+        """
+
+        if X.get_shape().ndims == 2: # M x D
+
+            X = X / self.lengthscales
+            Xs = tf.reduce_sum(tf.square(X), 1)
+            if X2 is None:
+                return -2 * tf.matmul(X, tf.transpose(X)) + \
+                       tf.reshape(Xs, (-1, 1)) + tf.reshape(Xs, (1, -1))
+            else:
+                X2 = X2 / self.lengthscales
+                X2s = tf.reduce_sum(tf.square(X2), 1)
+                return -2 * tf.matmul(X, tf.transpose(X2)) + \
+                       tf.reshape(Xs, (-1, 1)) + tf.reshape(X2s, (1, -1))
+
+        elif X.get_shape().ndims == 3: # M x D x B
+
+            X = X / tf.expand_dims(tf.expand_dims(self.lengthscales, -1), 0)
+            Xs = tf.reduce_sum(tf.square(X), 1)  # NxB
+            if X2 is None:
+                d = -2 * tf.matmul(tf.transpose(X, (2, 0, 1)), tf.transpose(X, (2, 1, 0))) + \
+                    tf.expand_dims(tf.transpose(Xs), 1) + \
+                    tf.expand_dims(tf.transpose(Xs), -1)
+            else:
+                shape = tf.stack([1, 1, tf.shape(X)[-1]])
+                X2 = tf.tile(tf.expand_dims(X2 / self.lengthscales, -1), shape)
+                X2s = tf.reduce_sum(tf.square(X2), 1)  # NxB
+                d = -2 * tf.matmul(tf.transpose(X, (2, 0, 1)), tf.transpose(X2, (2, 1, 0))) + \
+                    tf.expand_dims(tf.transpose(Xs), -1) + \
+                    tf.expand_dims(tf.transpose(X2s), 1)
+            # d is BxNxN
+            return tf.transpose(d, (1, 2, 0))  # N x N x B
 
     def euclid_dist(self, X, X2):
         r2 = self.square_dist(X, X2)
         return tf.sqrt(r2 + 1e-12)
 
     def Kdiag(self, X, presliced=False):
-        return tf.fill(tf.stack([tf.shape(X)[0]]), tf.squeeze(self.variance))
-
-    def square_dist_batch(self, X, X2):
-        """
-        :param X: NxDxB
-        :param X2: NxD
-        :return: NxNxB
-        """
-        X = X / tf.expand_dims(tf.expand_dims(self.lengthscales,-1),0)
-        Xs = tf.reduce_sum(tf.square(X), 1) # NxB
-        if X2 is None:
-            d= -2 * tf.matmul(tf.transpose(X,(2,0,1)), tf.transpose(X,(2,1,0))) + \
-                   tf.expand_dims(tf.transpose(Xs),1)+ \
-                   tf.expand_dims(tf.transpose(Xs),-1)
-        else:
-            shape = tf.stack([1,1,tf.shape(X)[-1]])
-            X2 = tf.tile(tf.expand_dims(X2/self.lengthscales,-1),shape)
-            X2s = tf.reduce_sum(tf.square(X2), 1) # NxB
-            d= -2 * tf.matmul(tf.transpose(X,(2,0,1)), tf.transpose(X2,(2,1,0))) + \
-                   tf.expand_dims(tf.transpose(Xs), -1) + \
-                   tf.expand_dims(tf.transpose(X2s), 1)
-        # d is BxNxN
-        return tf.transpose(d,(1,2,0)) # N x N x B
-
-    def euclid_dist_batch(self, X, X2):
-        r2 = self.square_dist_batch(X, X2)
-        return tf.sqrt(r2 + 1e-12)
-
-    def Kdiag_batch(self, X, presliced=False):
-        """
-        :param X: NxDxB 
-        :param presliced: 
-        :return: NxB
-        """
-        return tf.fill(tf.stack([tf.shape(X)[0],tf.shape(X)[-1]]), tf.squeeze(self.variance))
+        if X.get_shape().ndims == 2: # M x D
+            return tf.fill(tf.stack([tf.shape(X)[0]]), tf.squeeze(self.variance))
+        elif X.get_shape().ndims == 3: # M x D x B
+            return tf.fill(tf.stack([tf.shape(X)[0], tf.shape(X)[-1]]), tf.squeeze(self.variance))
 
 
 
@@ -217,11 +200,6 @@ class RBF(Stationary):
         if not presliced:
             X, X2 = self._slice(X, X2)
         return self.variance * tf.exp(-self.square_dist(X, X2) / 2)
-
-    def K_batch(self, X, X2=None, presliced=False):
-        if not presliced:
-            X, X2 = self._slice_batch(X, X2)
-        return self.variance * tf.exp(-self.square_dist_batch(X, X2) / 2)
 
 
 class PeriodicKernel(Kern):
@@ -315,12 +293,6 @@ class Add(Combination):
     def Kdiag(self, X, presliced=False):
         return reduce(tf.add, [k.Kdiag(X) for k in self.kern_list])
 
-    def K_batch(self, X, X2=None, presliced=False):
-        return reduce(tf.add, [k.K_batch(X, X2) for k in self.kern_list])
-
-    def Kdiag_batch(self, X, presliced=False):
-        return reduce(tf.add, [k.Kdiag_batch(X) for k in self.kern_list])
-
 
 class Prod(Combination):
     def K(self, X, X2=None, presliced=False):
@@ -328,12 +300,6 @@ class Prod(Combination):
 
     def Kdiag(self, X, presliced=False):
         return reduce(tf.multiply, [k.Kdiag(X) for k in self.kern_list])
-
-    def K_batch(self, X, X2=None, presliced=False):
-        return reduce(tf.multiply, [k.K_batch(X, X2) for k in self.kern_list])
-
-    def Kdiag_batch(self, X, presliced=False):
-        return reduce(tf.multiply, [k.Kdiag_batch(X) for k in self.kern_list])
 
 
 
@@ -352,32 +318,25 @@ class Linear(Kern):
         Kern.__init__(self, input_dim, active_dims)
         self.variance = tf.get_variable("variance", [1], initializer=tf.constant_initializer(variance))
 
-    def K(self, X, X2=None, presliced=False):
-        if not presliced:
-            X, X2 = self._slice(X, X2)
-        if X2 is None:
-            return tf.matmul(X * self.variance, X, transpose_b=True)
-        else:
-            return tf.matmul(X * self.variance, X2, transpose_b=True)
-
     def Kdiag(self, X, presliced=False):
         if not presliced:
             X, _ = self._slice(X, None)
         return tf.reduce_sum(tf.square(X) * self.variance, 1)
 
-    def K_batch(self, X, X2=None, presliced=False):
+    def K(self, X, X2=None, presliced=False):
         if not presliced:
             X, X2 = self._slice_batch(X, X2)
-        if X2 is None:
-            return tf.einsum('ndb,mdb->nmb',X,X)
-        else:
-            return tf.einsum('ndb,md->nmb',X,X2)
 
-    def Kdiag_batch(self, X, presliced=False):
-        if not presliced:
-            X, _ = self._slice_batch(X, None)
-        return tf.reduce_sum(tf.square(X) * self.variance, 1)
-
+        if X.get_shape().ndims == 2: # M x D
+            if X2 is None:
+                return tf.matmul(X * self.variance, X, transpose_b=True)
+            else:
+                return tf.matmul(X * self.variance, X2, transpose_b=True)
+        elif X.get_shape().ndims == 3: # M x D x B
+            if X2 is None:
+                return tf.einsum('ndb,mdb->nmb', X, X)
+            else:
+                return tf.einsum('ndb,md->nmb', X, X2)
 
 
 class Static(Kern):
@@ -390,46 +349,56 @@ class Static(Kern):
         Kern.__init__(self, input_dim, active_dims)
         self.variance = tf.get_variable("variance", [1],  initializer=tf.constant_initializer(variance))
 
-    def Kdiag(self, X):
-        return tf.fill(tf.stack([tf.shape(X)[0]]), tf.squeeze(self.variance))
-
-    def Kdiag_batch(self, X, presliced=False):
+    def Kdiag(self, X,presliced=False):
         if not presliced:
             X, _ = self._slice_batch(X, None)
-        return tf.fill(tf.stack([tf.shape(X)[0],tf.shape(X)[-1]]), tf.squeeze(self.variance))
+        if X.get_shape().ndims == 2: # M x D
+            return tf.fill(tf.stack([tf.shape(X)[0]]), tf.squeeze(self.variance))
+        elif X.get_shape().ndims == 3: # M x D x B
+            return tf.fill(tf.stack([tf.shape(X)[0],tf.shape(X)[-1]]), tf.squeeze(self.variance))
 
 
 class White(Static):
     """
     The White kernel
     """
-
     def K(self, X, X2=None, presliced=False):
-        if X2 is None:
-            d = tf.fill(tf.stack([tf.shape(X)[0]]), tf.squeeze(self.variance))
-            return tf.diag(d)
-        else:
-            shape = tf.stack([tf.shape(X)[0], tf.shape(X2)[0]])
-            return tf.zeros(shape, float_type)
 
-    def K_batch(self, X, X2=None, presliced=False):
-        if X2 is None:
-            d = tf.fill(tf.stack([tf.shape(X)[-1],tf.shape(X)[0]]), tf.squeeze(self.variance))
-            return tf.transpose(tf.matrix_diag(d),(1,2,0))
-        else:
-            shape = tf.stack([tf.shape(X)[0], tf.shape(X2)[0],tf.shape(X)[-1]])
-            return tf.zeros(shape, float_type)
+        if X.get_shape().ndims == 2: # M x D
+            if X2 is None:
+                d = tf.fill(tf.stack([tf.shape(X)[0]]), tf.squeeze(self.variance))
+                return tf.diag(d)
+            else:
+                shape = tf.stack([tf.shape(X)[0], tf.shape(X2)[0]])
+                return tf.zeros(shape, float_type)
+
+        elif X.get_shape().ndims == 3: # M x D x B
+            if X2 is None:
+                d = tf.fill(tf.stack([tf.shape(X)[-1], tf.shape(X)[0]]), tf.squeeze(self.variance))
+                return tf.transpose(tf.matrix_diag(d), (1, 2, 0))
+            else:
+                shape = tf.stack([tf.shape(X)[0], tf.shape(X2)[0], tf.shape(X)[-1]])
+                return tf.zeros(shape, float_type)
 
 
 class Constant(Static):
     """
     The constant kernel
     """
-
     def K(self, X, X2=None, presliced=False):
-        if X2 is None: # returns the prior
-            shape = tf.stack([tf.shape(X)[0],tf.shape(X)[0]])
-        else:
-            shape = tf.stack([tf.shape(X)[0],tf.shape(X2)[0]])
+
+        if X.get_shape().ndims == 2: # M x D
+            if X2 is None:  # returns the prior
+                shape = tf.stack([tf.shape(X)[0], tf.shape(X)[0]])
+            else:
+                shape = tf.stack([tf.shape(X)[0], tf.shape(X2)[0]])
+
+        elif X.get_shape().ndims == 3: # M x D x B
+            if X2 is None:  # returns the prior
+                shape = tf.stack([tf.shape(X)[0], tf.shape(X)[0], tf.shape(X)[-1]])
+            else:
+                shape = tf.stack([tf.shape(X)[0], tf.shape(X2)[0], tf.shape(X)[-1]])
+
         return tf.fill(shape, tf.squeeze(self.variance))
+
 

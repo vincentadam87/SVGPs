@@ -122,8 +122,8 @@ def conditional_batch(Xnew, X, kern, f, q_sqrt=None, whiten=False):
     Lm = tf.cholesky(Kmm)
 
     # kernel matrices for all batch to predict on
-    Knn = kern.K_batch(Xnew) # N x N x B
-    Knm = kern.K_batch(Xnew,X) # N x M x B
+    Knn = kern.K(Xnew) # N x N x B
+    Knm = kern.K(Xnew,X) # N x M x B
 
     # Compute the projection matrix A
     Lm = tf.tile(tf.expand_dims(Lm,0),tf.stack([tf.shape(Xnew)[-1],1,1])) # B x M x M
