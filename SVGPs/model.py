@@ -243,7 +243,7 @@ class CSVGPs(object):
     Coupled SVGPs
     """
     def __init__(self, X, Y, kerns,likelihood,Zs, n_param=0,
-                 f_indices=None,mean_functions=None, whiten=True,
+                 f_indices=None,mean_functions=None, whiten=True, W=None,
                  n_samp=50,sampling=False):
         '''
         - X is a data matrix, size N x D
@@ -270,6 +270,7 @@ class CSVGPs(object):
         self.whiten=whiten
         self.n_samp =n_samp
         self.sampling = sampling
+        self.W = W if W is not None else np.ones((self.C,1),dtype=np.float32)
 
         self.num_inducing = [z.shape[0] for z in Zs]
 
@@ -344,13 +345,14 @@ class CSVGPs(object):
 
 class SVAGP(CSVGPs):
 
+
     def build_predictor(self,Xnew):
         fmean, fvar = self.build_predict_joint(Xnew)
-        return tf.reduce_sum(fmean,1),tf.reduce_sum(fvar,[1,2])
+        return tf.reduce_sum(fmean*self.W,1),tf.reduce_sum(fvar*tf.square(self.W),[1,2])
 
     def sample_predictor(self,Xnew):
         s = self.sample_joint(Xnew) # Nsamp x N x C x R
-        return tf.reduce_sum(s,2) # Nsamp x N x R
+        return tf.reduce_sum(s*self.W,2) # Nsamp x N x R
 
 
 class SVMGP(CSVGPs):
